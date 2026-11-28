@@ -11,31 +11,53 @@ class SimpleYawObstacleAvoider(Node):
     def __init__(self):
         super().__init__('simple_yaw_obstacle_avoider')
 
-        self.cmd_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.odom_sub = self.create_subscription(Odometry, '/odom', self.scan_callback, 10)
+        self.cmd_pub = self.create_publisher(
+            TwistStamped, '/cmd_vel', 10
+        )
+        self.scan_sub = self.create_subscription(
+            LaserScan, '/scan', self.scan_callback, 10
+        )
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odom', self.odom_callback, 10
+        )
 
         self.state = "MOVE"
 
         self.front_threshold = 0.25
         self.linear_speed = 0.2
         self.angular_speed = 0.5
-        
+
         self.current_yaw = 0.0
         self.target_yaw = 0.0
         self.yaw_tolerance = 0.05
         self.rotation_angle = math.pi / 6
 
+        self.odom_received = False
+
     def odom_callback(self, msg: Odometry):
         q = msg.pose.pose.orientation
         quat = [q.x, q.y, q.z, q.w]
-        quat.roll, quat.pitch, self.current_yaw = euler_from_quaternion(quat)
+
+        roll, pitch, self.current_yaw = euler_from_quaternion(quat)
+
+        self.odom_received = True
 
     def scan_callback(self, scan: LaserScan):
-        left_vals = [distance for distance in scan.ranges[:31] if math.isfinite(distance)]
+
+        if not self.odom_received:
+            self.cmd_pub.publish(TwistStamped())
+            return
+
+        left_vals = [
+            distance for distance in scan.ranges[:31]
+            if math.isfinite(distance)
+        ]
         left_avg = sum(left_vals) / len(left_vals) if left_vals else 0.0
 
-        right_vals = [distance for distance in scan.ranges[-30:] if math.isfinite(distance)]
+        right_vals = [
+            distance for distance in scan.ranges[-30:]
+            if math.isfinite(distance)
+        ]
         right_avg = sum(right_vals) / len(right_vals) if right_vals else 0.0
 
         front_vals = left_vals + right_vals
@@ -44,30 +66,53 @@ class SimpleYawObstacleAvoider(Node):
         ts = TwistStamped()
 
         if self.state == "TURN":
-            angle_diff = self.normalize_angle(self.target_yaw - self.current_yaw)
 
-            if self.front_threshold > front_min:
+            angle_diff = self.normalize_angle(
+                self.target_yaw - self.current_yaw
+            )
+
+            if abs(angle_diff) > self.yaw_tolerance:
+
                 ts.twist.linear.x = 0.0
-                ts.twist.angular.z = angle_diff * self.angular_speed
+
+                turn_speed = min(
+                    self.angular_speed,
+                    max(0.15, abs(angle_diff))
+                )
+
+                ts.twist.angular.z = (
+                    turn_speed if angle_diff > 0
+                    else -turn_speed
+                )
+
             else:
                 self.state = "MOVE"
 
+                ts.twist.linear.x = 0.0
+                ts.twist.angular.z = 0.0
+
         else:
+
             if front_min > self.front_threshold:
+
                 ts.twist.linear.x = self.linear_speed
                 ts.twist.angular.z = 0.0
+
             else:
+
                 self.state = "TURN"
 
                 turn_dir = 1 if left_avg > right_avg else -1
-                self.target_yaw = self.normalize_angle(self.current_yaw + turn_dir * self.rotation_angle)
+
+                self.target_yaw = self.normalize_angle(
+                    self.current_yaw
+                    + turn_dir * self.rotation_angle
+                )
 
                 ts.twist.linear.x = 0.0
                 ts.twist.angular.z = self.angular_speed * turn_dir
 
-        ...  # 값이 설정된 TwistStamped 메세지를 Publish
         self.cmd_pub.publish(ts)
-        
 
     def normalize_angle(self, angle):
         return math.atan2(math.sin(angle), math.cos(angle))
