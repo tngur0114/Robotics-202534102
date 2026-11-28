@@ -1,20 +1,31 @@
+import math
 import rclpy
 from rclpy.node import Node
 from custom_interfaces.srv import MoveRobot
 
+
 class MoveRobotServer(Node):
     def __init__(self):
-        super().__init__('srv_server')
+        super().__init__('move_robot_server')
 
-        self.srv = self.create_service(MoveRobot, '/add_two_ints', self.srv_callback)
-        self.get_logger().info('Srv Server Ready.')
+        self.srv = self.create_service(MoveRobot, 'move_robot', self.move_robot_callback)
+        self.get_logger().info('Move Robot Service Server Started!')
 
-    def srv_callback(self, request, response):
-        response.sum.pose = request.a.pose + request.b.pose
-        
-        self.get_logger().info(f'Incoming request\nx: {request.x.pose}, y: {request.y.pose}, theta: {request.theta.pose}')
-        self.get_logger().info(f'Sending back response: [{response.result_pose.pose}]')
-        
+    def move_robot_callback(self, request, response):
+        x = request.current_pose.x
+        y = request.current_pose.y
+        theta = request.current_pose.theta
+        distance = request.distance
+
+        response.result_pose.x = x + distance * math.cos(theta)
+        response.result_pose.y = y + distance * math.sin(theta)
+        response.result_pose.theta = theta
+        response.success = True
+
+        self.get_logger().info(f'Current Pose: ({x:.2f}, {y:.2f}, {theta:.2f})')
+        self.get_logger().info(f'Distance: {distance:.2f}')
+        self.get_logger().info(f'Result Pose: ({response.result_pose.x:.2f}, {response.result_pose.y:.2f}, {response.result_pose.theta:.2f})')
+
         return response
 
 
@@ -28,3 +39,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
