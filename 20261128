@@ -1,0 +1,96 @@
+#include <Arduino.h>
+
+#define LIDAR_RX 16
+#define FR_IN1 26
+#define FR_IN2 25
+#define FL_IN1 19
+#define FL_IN2 27
+#define RR_IN1 23
+#define RR_IN2 12
+#define RL_IN1 0
+#define RL_IN2 15
+
+constexpr int LIDAR_UART_TX_UNUSED = 17;  // Leave GPIO17 disconnected from the LiDAR.
+constexpr int LIDAR_BAUD = 230400;
+constexpr int FRONT_CENTER_DEG = 0;       // Set to the LiDAR angle straight ahead.
+constexpr int FRONT_HALF_WIDTH_DEG = 35;
+constexpr uint16_t STOP_MM = 350;
+constexpr uint16_t RESUME_MM = 450;
+constexpr uint8_t FORWARD_PWM = 100;      // Duty 0-255, not measured wheel speed.
+
+struct Motor {
+  uint8_t in1;
+  uint8_t in2;
+  bool reversed;
+};
+
+constexpr Motor MOTORS[] = {
+    {FR_IN1, FR_IN2, false},
+    {FL_IN1, FL_IN2, false},
+    {RR_IN1, RR_IN2, false},
+    {RL_IN1, RL_IN2, false},
+};
+
+constexpr int PACKET_BYTES = 47;
+constexpr int POINTS_PER_PACKET = 12;
+constexpr int FULL_TURN_CDEG = 36000;
+constexpr int FRONT_HALF_CDEG = FRONT_HALF_WIDTH_DEG * 100;
+constexpr int MAX_FRONT_GAP_CDEG = 600;
+constexpr uint16_t MAX_RANGE_MM = 12000;
+constexpr uint32_t UART_TIMEOUT_MS = 150;
+constexpr uint32_t FRONT_TIMEOUT_MS = 300;
+constexpr uint16_t NO_RANGE = UINT16_MAX;
+
+uint8_t packet[PACKET_BYTES];
+int bytesReceived = 0;
+bool driving = false;
+bool receivingLidar = false;
+bool scanningFront = false;
+bool frontCoverageOk = false;
+int lastFrontOffset = 0;
+uint16_t sweepMin = NO_RANGE;
+uint16_t frontMin = NO_RANGE;
+uint32_t lastPacketMs = 0;
+uint32_t lastFrontMs = 0;
+
+void setDriving(bool enabled) {
+  if (enabled == driving) return;
+  for (const Motor &motor : MOTORS) {
+    const uint8_t forwardPin = motor.reversed ? motor.in2 : motor.in1;
+    analogWrite(forwardPin, enabled ? FORWARD_PWM : 0);
+  }
+  driving = enabled;
+}
+
+uint16_t readU16(const uint8_t *bytes) {
+  return uint16_t(bytes[0]) | (uint16_t(bytes[1]) << 8);
+}
+
+uint8_t packetCrc() {
+  uint8_t crc = 0;
+  for (int i = 0; i < PACKET_BYTES - 1; ++i) {
+    crc ^= packet[i];
+    for (int bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x80) ? uint8_t((crc << 1) ^ 0x4D) : uint8_t(crc << 1);
+    }
+  }
+  return crc;
+}
+
+void checkFrontPoint(int angle, uint16_t distance, uint32_t now) {
+  // Signed offset from the robot's front, including across 359 to 0 degrees.
+  int offset = (angle - FRONT_CENTER_DEG * 100 + FULL_TURN_CDEG * 3 / 2)
+               % FULL_TURN_CDEG - FULL_TURN_CDEG / 2;
+  if (offset < -FRONT_HALF_CDEG || offset > FRONT_HALF_CDEG) {
+    if (!scanningFront) return;
+    scanningFront = false;
+
+    // Accept a sweep after the beam exits the far edge with enough usable samples.
+    if (offset < -FRONT_HALF_CDEG || !frontCoverageOk || sweepMin == NO_RANGE ||
+        FRONT_HALF_CDEG - lastFrontOffset > MAX_FRONT_GAP_CDEG) {
+      frontMin = NO_RANGE;
+      setDriving(false);
+      return;
+    }
+    frontMin = sweepMin;
+    lastFrontMs = now;
